@@ -174,7 +174,9 @@ function escapeData(s: string): string {
 }
 
 const STEP_SUMMARY_MAX_FAILURES = 20;
+const STEP_SUMMARY_MAX_FLAKY_TESTS = 20;
 const STEP_SUMMARY_MAX_MESSAGE_LENGTH = 400;
+const STEP_SUMMARY_MAX_FLAKY_MESSAGE_LENGTH = 160;
 const ROOT_PATH_PLACEHOLDER = '<ROOT>';
 const DEFAULT_PROJECT_NAME = 'rstest';
 
@@ -282,6 +284,7 @@ async function renderStepSummary({
   const packageManagerAgent = await detectPackageManagerAgent(rootPath);
   const displayPath = getStepSummaryDisplayPath(rootPath);
   const hasUnhandledErrors = (unhandledErrors?.length ?? 0) > 0;
+  const flakyTests = collectFlakyTests(testResults);
   const isSuccess = failures.length === 0 && !hasUnhandledErrors;
   const reportIcon = isSuccess ? '✅' : '❌';
   const projectLabel = getStepSummaryProjectLabel({
@@ -314,7 +317,39 @@ async function renderStepSummary({
   lines.push(
     `| **Duration** | ${prettyTime(duration.totalTime)} (build ${prettyTime(duration.buildTime)}, tests ${prettyTime(duration.testTime)}) |`,
   );
+  if (flakyTests.length > 0) {
+    lines.push(
+      `| **Flaky Tests** | ${formatFlakyTestCount(flakyTests.length)} |`,
+    );
+  }
   lines.push('');
+
+  if (flakyTests.length > 0) {
+    pushHeading(lines, 2, 'Flaky Tests');
+
+    if (flakyTests.length > STEP_SUMMARY_MAX_FLAKY_TESTS) {
+      lines.push(
+        `Showing first ${STEP_SUMMARY_MAX_FLAKY_TESTS} of ${flakyTests.length} flaky tests.`,
+      );
+      lines.push('');
+    }
+
+    for (const flakyTest of flakyTests.slice(0, STEP_SUMMARY_MAX_FLAKY_TESTS)) {
+      const relativePath = relative(rootPath, flakyTest.testPath);
+      const fullName = formatFullTestName(flakyTest);
+      const title = fullName ? `${relativePath} > ${fullName}` : relativePath;
+      lines.push(
+        `- \`${title}\` (passed after retry x${flakyTest.retryCount})`,
+      );
+
+      const previousFailureSummary = getPreviousFailureSummary(flakyTest);
+      if (previousFailureSummary) {
+        lines.push(`  Previous failure: ${previousFailureSummary}`);
+      }
+    }
+
+    lines.push('');
+  }
 
   if (!isSuccess) {
     pushHeading(lines, 2, 'Failures');
@@ -411,4 +446,40 @@ function trimForSummary(input: string): string {
   }
 
   return `${input.slice(0, STEP_SUMMARY_MAX_MESSAGE_LENGTH - 1)}…`;
+}
+
+function collectFlakyTests(testResults: TestResult[]): TestResult[] {
+  return testResults.filter(
+    (result) => result.status === 'pass' && (result.retryCount ?? 0) > 0,
+  );
+}
+
+function getPreviousFailureSummary(testResult: TestResult): string | undefined {
+  const parts = (testResult.retryErrors || testResult.errors || [])
+    .map((error) => {
+      const message = stripAnsi(error.message).replace(/\s+/g, ' ').trim();
+      if (!message) {
+        return undefined;
+      }
+
+      return `${getErrorType(error)}: ${message}`;
+    })
+    .filter((part, index, items): part is string => {
+      return Boolean(part) && items.indexOf(part) === index;
+    });
+
+  if (parts.length === 0) {
+    return undefined;
+  }
+
+  const summary = parts.join('; ');
+  if (summary.length <= STEP_SUMMARY_MAX_FLAKY_MESSAGE_LENGTH) {
+    return summary;
+  }
+
+  return `${summary.slice(0, STEP_SUMMARY_MAX_FLAKY_MESSAGE_LENGTH - 1)}…`;
+}
+
+function formatFlakyTestCount(count: number): string {
+  return count === 1 ? '1 passed after retry' : `${count} passed after retry`;
 }
